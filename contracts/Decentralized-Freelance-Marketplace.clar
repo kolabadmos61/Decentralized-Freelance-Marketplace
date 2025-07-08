@@ -331,3 +331,150 @@
 (define-read-only (get-dispute-counter)
   (var-get dispute-counter)
 )
+
+(define-map freelancer-performance
+  principal
+  {
+    total-milestones: uint,
+    on-time-deliveries: uint,
+    average-satisfaction: uint,
+    total-ratings: uint,
+    performance-score: uint
+  }
+)
+
+(define-map milestone-performance
+  uint
+  {
+    submitted-at: uint,
+    approved-at: uint,
+    deadline: uint,
+    was-on-time: bool,
+    client-rating: (optional uint)
+  }
+)
+
+(define-public (track-milestone-performance (milestone-id uint) (deadline uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project (unwrap! (map-get? projects (get project-id milestone)) ERR_PROJECT_NOT_FOUND))
+    )
+    (begin
+      (asserts! (is-eq (get client project) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status milestone) "pending") ERR_INVALID_STATUS)
+      (map-set milestone-performance milestone-id {
+        submitted-at: u0,
+        approved-at: u0,
+        deadline: deadline,
+        was-on-time: false,
+        client-rating: none
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-public (submit-performance-rating (milestone-id uint) (rating uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project (unwrap! (map-get? projects (get project-id milestone)) ERR_PROJECT_NOT_FOUND))
+      (performance (unwrap! (map-get? milestone-performance milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (freelancer-addr (unwrap! (get freelancer project) ERR_NOT_AUTHORIZED))
+      (current-perf (default-to {total-milestones: u0, on-time-deliveries: u0, average-satisfaction: u0, total-ratings: u0, performance-score: u0} (map-get? freelancer-performance freelancer-addr)))
+    )
+    (begin
+      (asserts! (is-eq (get client project) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status milestone) "approved") ERR_INVALID_STATUS)
+      (asserts! (and (>= rating u1) (<= rating u5)) ERR_INVALID_STATUS) 
+      (asserts! (is-none (get client-rating performance)) ERR_ALREADY_EXISTS)
+      (asserts! (map-set milestone-performance milestone-id (merge performance {client-rating: (some rating)})) (err u999))
+      (update-freelancer-performance freelancer-addr rating)
+    )
+  )
+)
+
+(define-private (update-freelancer-performance (freelancer-addr principal) (new-rating uint))
+  (let
+    (
+      (current-perf (default-to {total-milestones: u0, on-time-deliveries: u0, average-satisfaction: u0, total-ratings: u0, performance-score: u0} (map-get? freelancer-performance freelancer-addr)))
+      (new-total-ratings (+ (get total-ratings current-perf) u1))
+      (new-avg-satisfaction (/ (+ (* (get average-satisfaction current-perf) (get total-ratings current-perf)) new-rating) new-total-ratings))
+      (new-performance-score (calculate-performance-score (get on-time-deliveries current-perf) (get total-milestones current-perf) new-avg-satisfaction))
+    )
+    (begin
+      (map-set freelancer-performance freelancer-addr {
+        total-milestones: (get total-milestones current-perf),
+        on-time-deliveries: (get on-time-deliveries current-perf),
+        average-satisfaction: new-avg-satisfaction,
+        total-ratings: new-total-ratings,
+        performance-score: new-performance-score
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-private (calculate-performance-score (on-time uint) (total uint) (satisfaction uint))
+  (if (> total u0)
+    (/ (+ (* (/ (* on-time u100) total) u60) (* satisfaction u40)) u100)
+    u0
+  )
+)
+
+(define-public (update-milestone-completion (milestone-id uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project (unwrap! (map-get? projects (get project-id milestone)) ERR_PROJECT_NOT_FOUND))
+      (performance (unwrap! (map-get? milestone-performance milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (freelancer-addr (unwrap! (get freelancer project) ERR_NOT_AUTHORIZED))
+      (current-perf (default-to {total-milestones: u0, on-time-deliveries: u0, average-satisfaction: u0, total-ratings: u0, performance-score: u0} (map-get? freelancer-performance freelancer-addr)))
+      (completion-time (unwrap! (get completed-at milestone) ERR_INVALID_STATUS))
+      (was-on-time (<= completion-time (get deadline performance)))
+    )
+    (begin
+      (asserts! (is-eq (some tx-sender) (get freelancer project)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status milestone) "approved") ERR_INVALID_STATUS)
+      (map-set milestone-performance milestone-id (merge performance {
+        submitted-at: completion-time,
+        approved-at: stacks-block-height,
+        was-on-time: was-on-time
+      }))
+      (map-set freelancer-performance freelancer-addr {
+        total-milestones: (+ (get total-milestones current-perf) u1),
+        on-time-deliveries: (+ (get on-time-deliveries current-perf) (if was-on-time u1 u0)),
+        average-satisfaction: (get average-satisfaction current-perf),
+        total-ratings: (get total-ratings current-perf),
+        performance-score: (calculate-performance-score (+ (get on-time-deliveries current-perf) (if was-on-time u1 u0)) (+ (get total-milestones current-perf) u1) (get average-satisfaction current-perf))
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-freelancer-performance (freelancer-addr principal))
+  (map-get? freelancer-performance freelancer-addr)
+)
+
+(define-read-only (get-milestone-performance (milestone-id uint))
+  (map-get? milestone-performance milestone-id)
+)
+
+(define-read-only (get-performance-metrics (freelancer-addr principal))
+  (let
+    (
+      (performance (map-get? freelancer-performance freelancer-addr))
+    )
+    (match performance
+      perf (some {
+        on-time-percentage: (if (> (get total-milestones perf) u0) (/ (* (get on-time-deliveries perf) u100) (get total-milestones perf)) u0),
+        average-rating: (get average-satisfaction perf),
+        total-projects: (get total-milestones perf),
+        overall-score: (get performance-score perf)
+      })
+      none
+    )
+  )
+)
