@@ -12,6 +12,9 @@
 (define-data-var milestone-counter uint u0)
 (define-data-var dispute-counter uint u0)
 
+(define-data-var portfolio-counter uint u0)
+(define-data-var endorsement-counter uint u0)
+
 (define-map projects
   uint
   {
@@ -477,4 +480,108 @@
       none
     )
   )
+)
+
+(define-map portfolio-items
+  uint
+  {
+    freelancer: principal,
+    project-id: uint,
+    title: (string-ascii 80),
+    description: (string-ascii 200),
+    category: (string-ascii 30),
+    client-testimonial: (string-ascii 300),
+    created-at: uint
+  }
+)
+
+(define-map freelancer-portfolios
+  principal
+  (list 10 uint)
+)
+
+(define-map skill-endorsements
+  uint
+  {
+    freelancer: principal,
+    endorser: principal,
+    skill: (string-ascii 40),
+    project-id: uint,
+    strength: uint,
+    created-at: uint
+  }
+)
+
+(define-map freelancer-endorsements
+  principal
+  (list 15 uint)
+)
+
+(define-public (create-portfolio-item (project-id uint) (title (string-ascii 80)) (description (string-ascii 200)) (category (string-ascii 30)) (testimonial (string-ascii 300)))
+  (let
+    (
+      (portfolio-id (+ (var-get portfolio-counter) u1))
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (current-items (default-to (list) (map-get? freelancer-portfolios tx-sender)))
+    )
+    (begin
+      (asserts! (is-eq (some tx-sender) (get freelancer project)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status project) "completed") ERR_INVALID_STATUS)
+      (var-set portfolio-counter portfolio-id)
+      (map-set portfolio-items portfolio-id {
+        freelancer: tx-sender,
+        project-id: project-id,
+        title: title,
+        description: description,
+        category: category,
+        client-testimonial: testimonial,
+        created-at: stacks-block-height
+      })
+      (map-set freelancer-portfolios tx-sender (unwrap! (as-max-len? (append current-items portfolio-id) u10) ERR_INVALID_STATUS))
+      (ok portfolio-id)
+    )
+  )
+)
+
+(define-public (endorse-skill (freelancer-addr principal) (project-id uint) (skill (string-ascii 40)) (strength uint))
+  (let
+    (
+      (endorsement-id (+ (var-get endorsement-counter) u1))
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (current-endorsements (default-to (list) (map-get? freelancer-endorsements freelancer-addr)))
+    )
+    (begin
+      (asserts! (is-eq (get client project) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (some freelancer-addr) (get freelancer project)) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status project) "completed") ERR_INVALID_STATUS)
+      (asserts! (and (>= strength u1) (<= strength u5)) ERR_INVALID_STATUS)
+      (var-set endorsement-counter endorsement-id)
+      (map-set skill-endorsements endorsement-id {
+        freelancer: freelancer-addr,
+        endorser: tx-sender,
+        skill: skill,
+        project-id: project-id,
+        strength: strength,
+        created-at: stacks-block-height
+      })
+      (map-set freelancer-endorsements freelancer-addr (unwrap! (as-max-len? (append current-endorsements endorsement-id) u15) ERR_INVALID_STATUS))
+      (ok endorsement-id)
+    )
+  )
+)
+
+(define-read-only (get-freelancer-portfolio (freelancer-addr principal))
+  (map-get? freelancer-portfolios freelancer-addr)
+)
+
+(define-read-only (get-portfolio-item (portfolio-id uint))
+  (map-get? portfolio-items portfolio-id)
+)
+
+(define-read-only (get-freelancer-endorsements (freelancer-addr principal))
+  (map-get? freelancer-endorsements freelancer-addr)
+)
+
+(define-read-only (get-skill-endorsement (endorsement-id uint))
+  (map-get? skill-endorsements endorsement-id)
 )
