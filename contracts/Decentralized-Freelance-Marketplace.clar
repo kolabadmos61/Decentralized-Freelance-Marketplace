@@ -8,6 +8,9 @@
 (define-constant ERR_INVALID_MILESTONE (err u106))
 (define-constant ERR_DISPUTE_EXISTS (err u107))
 
+(define-constant ERR_AUTO_RELEASE_NOT_READY (err u108))
+(define-constant DEFAULT_AUTO_RELEASE_BLOCKS u1008)
+
 (define-data-var project-counter uint u0)
 (define-data-var milestone-counter uint u0)
 (define-data-var dispute-counter uint u0)
@@ -584,4 +587,66 @@
 
 (define-read-only (get-skill-endorsement (endorsement-id uint))
   (map-get? skill-endorsements endorsement-id)
+)
+
+
+(define-map milestone-auto-release
+  uint
+  {
+    auto-release-at: uint,
+    is-auto-released: bool
+  }
+)
+
+(define-public (set-milestone-auto-release (milestone-id uint) (release-blocks uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project (unwrap! (map-get? projects (get project-id milestone)) ERR_PROJECT_NOT_FOUND))
+      (release-block (+ stacks-block-height release-blocks))
+    )
+    (begin
+      (asserts! (is-eq (get client project) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (is-eq (get status milestone) "pending") ERR_INVALID_STATUS)
+      (map-set milestone-auto-release milestone-id {
+        auto-release-at: release-block,
+        is-auto-released: false
+      })
+      (ok release-block)
+    )
+  )
+)
+
+(define-public (execute-auto-release (milestone-id uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project (unwrap! (map-get? projects (get project-id milestone)) ERR_PROJECT_NOT_FOUND))
+      (auto-release-info (unwrap! (map-get? milestone-auto-release milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (escrow-balance (default-to u0 (map-get? escrow-balances (get project-id milestone))))
+    )
+    (begin
+      (asserts! (is-eq (get status milestone) "submitted") ERR_INVALID_STATUS)
+      (asserts! (>= stacks-block-height (get auto-release-at auto-release-info)) ERR_AUTO_RELEASE_NOT_READY)
+      (asserts! (is-eq (get is-auto-released auto-release-info) false) ERR_ALREADY_EXISTS)
+      (asserts! (>= escrow-balance (get amount milestone)) ERR_INSUFFICIENT_FUNDS)
+      (asserts! (is-none (map-get? disputes milestone-id)) ERR_DISPUTE_EXISTS)
+      (try! (as-contract (stx-transfer? (get amount milestone) tx-sender (unwrap! (get freelancer project) ERR_NOT_AUTHORIZED))))
+      (map-set escrow-balances (get project-id milestone) (- escrow-balance (get amount milestone)))
+      (map-set milestones milestone-id (merge milestone { status: "auto-released" }))
+      (map-set milestone-auto-release milestone-id (merge auto-release-info { is-auto-released: true }))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-milestone-auto-release (milestone-id uint))
+  (map-get? milestone-auto-release milestone-id)
+)
+
+(define-read-only (is-auto-release-ready (milestone-id uint))
+  (match (map-get? milestone-auto-release milestone-id)
+    auto-info (>= stacks-block-height (get auto-release-at auto-info))
+    false
+  )
 )
