@@ -650,3 +650,86 @@
     false
   )
 )
+
+
+(define-constant ERR_INSUFFICIENT_RESERVE (err u109))
+
+(define-map milestone-reserves
+  uint
+  {
+    reserved-amount: uint,
+    is-released: bool,
+    reserved-at: uint
+  }
+)
+
+(define-map project-reserved-totals
+  uint
+  uint
+)
+
+(define-public (create-milestone-with-reserve (project-id uint) (description (string-ascii 200)) (amount uint))
+  (let
+    (
+      (project (unwrap! (map-get? projects project-id) ERR_PROJECT_NOT_FOUND))
+      (milestone-id (+ (var-get milestone-counter) u1))
+      (current-milestones (default-to (list) (map-get? project-milestones project-id)))
+      (escrow-balance (default-to u0 (map-get? escrow-balances project-id)))
+      (total-reserved (default-to u0 (map-get? project-reserved-totals project-id)))
+      (available-balance (- escrow-balance total-reserved))
+    )
+    (begin
+      (asserts! (is-eq (get client project) tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (>= available-balance amount) ERR_INSUFFICIENT_RESERVE)
+      (var-set milestone-counter milestone-id)
+      (map-set milestones milestone-id {
+        project-id: project-id,
+        description: description,
+        amount: amount,
+        status: "pending",
+        created-at: stacks-block-height,
+        completed-at: none
+      })
+      (map-set milestone-reserves milestone-id {
+        reserved-amount: amount,
+        is-released: false,
+        reserved-at: stacks-block-height
+      })
+      (map-set project-reserved-totals project-id (+ total-reserved amount))
+      (map-set project-milestones project-id (unwrap! (as-max-len? (append current-milestones milestone-id) u20) ERR_INVALID_MILESTONE))
+      (ok milestone-id)
+    )
+  )
+)
+
+(define-public (release-milestone-reserve (milestone-id uint))
+  (let
+    (
+      (milestone (unwrap! (map-get? milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (reserve-info (unwrap! (map-get? milestone-reserves milestone-id) ERR_MILESTONE_NOT_FOUND))
+      (project-id (get project-id milestone))
+      (total-reserved (default-to u0 (map-get? project-reserved-totals project-id)))
+    )
+    (begin
+      (asserts! (is-eq (get status milestone) "approved") ERR_INVALID_STATUS)
+      (asserts! (is-eq (get is-released reserve-info) false) ERR_ALREADY_EXISTS)
+      (map-set milestone-reserves milestone-id (merge reserve-info {is-released: true}))
+      (map-set project-reserved-totals project-id (- total-reserved (get reserved-amount reserve-info)))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-milestone-reserve (milestone-id uint))
+  (map-get? milestone-reserves milestone-id)
+)
+
+(define-read-only (get-available-escrow-balance (project-id uint))
+  (let
+    (
+      (escrow-balance (default-to u0 (map-get? escrow-balances project-id)))
+      (total-reserved (default-to u0 (map-get? project-reserved-totals project-id)))
+    )
+    (some (- escrow-balance total-reserved))
+  )
+)
