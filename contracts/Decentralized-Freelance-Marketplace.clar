@@ -11,6 +11,16 @@
 (define-constant ERR_AUTO_RELEASE_NOT_READY (err u108))
 (define-constant DEFAULT_AUTO_RELEASE_BLOCKS u1008)
 
+(define-constant ERR_BADGE_ALREADY_EARNED (err u110))
+(define-constant ERR_REQUIREMENTS_NOT_MET (err u111))
+
+(define-constant BADGE_ROOKIE "rookie")
+(define-constant BADGE_VETERAN "veteran")
+(define-constant BADGE_ELITE "elite")
+(define-constant BADGE_PERFECT_RATING "perfect-rating")
+(define-constant BADGE_SPEED_DEMON "speed-demon")
+(define-constant BADGE_TOP_EARNER "top-earner")
+
 (define-data-var project-counter uint u0)
 (define-data-var milestone-counter uint u0)
 (define-data-var dispute-counter uint u0)
@@ -732,4 +742,84 @@
     )
     (some (- escrow-balance total-reserved))
   )
+)
+
+
+(define-map freelancer-badges
+  {freelancer: principal, badge-type: (string-ascii 20)}
+  {
+    earned-at: uint,
+    qualifying-metric: uint
+  }
+)
+
+(define-map freelancer-badge-list
+  principal
+  (list 20 (string-ascii 20))
+)
+
+(define-public (claim-badge (badge-type (string-ascii 20)))
+  (let
+    (
+      (performance (default-to {total-milestones: u0, on-time-deliveries: u0, average-satisfaction: u0, total-ratings: u0, performance-score: u0} (map-get? freelancer-performance tx-sender)))
+      (current-badges (default-to (list) (map-get? freelancer-badge-list tx-sender)))
+      (profile (unwrap! (map-get? freelancer-profiles tx-sender) ERR_NOT_AUTHORIZED))
+      (qualifies (check-badge-eligibility badge-type performance profile))
+      (metric (get-qualifying-metric badge-type performance profile))
+    )
+    (begin
+      (asserts! qualifies ERR_REQUIREMENTS_NOT_MET)
+      (asserts! (is-none (map-get? freelancer-badges {freelancer: tx-sender, badge-type: badge-type})) ERR_BADGE_ALREADY_EARNED)
+      (map-set freelancer-badges {freelancer: tx-sender, badge-type: badge-type} {
+        earned-at: stacks-block-height,
+        qualifying-metric: metric
+      })
+      (map-set freelancer-badge-list tx-sender (unwrap! (as-max-len? (append current-badges badge-type) u20) ERR_INVALID_STATUS))
+      (ok badge-type)
+    )
+  )
+)
+
+(define-private (check-badge-eligibility (badge-type (string-ascii 20)) (perf {total-milestones: uint, on-time-deliveries: uint, average-satisfaction: uint, total-ratings: uint, performance-score: uint}) (profile {name: (string-ascii 50), skills: (string-ascii 200), hourly-rate: uint, rating: uint, completed-projects: uint}))
+  (if (is-eq badge-type BADGE_ROOKIE)
+    (>= (get completed-projects profile) u1)
+    (if (is-eq badge-type BADGE_VETERAN)
+      (>= (get completed-projects profile) u10)
+      (if (is-eq badge-type BADGE_ELITE)
+        (>= (get completed-projects profile) u50)
+        (if (is-eq badge-type BADGE_PERFECT_RATING)
+          (and (>= (get total-ratings perf) u5) (is-eq (get average-satisfaction perf) u5))
+          (if (is-eq badge-type BADGE_SPEED_DEMON)
+            (and (>= (get total-milestones perf) u5) (>= (if (> (get total-milestones perf) u0) (/ (* (get on-time-deliveries perf) u100) (get total-milestones perf)) u0) u95))
+            (if (is-eq badge-type BADGE_TOP_EARNER)
+              (>= (get completed-projects profile) u25)
+              false
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+(define-private (get-qualifying-metric (badge-type (string-ascii 20)) (perf {total-milestones: uint, on-time-deliveries: uint, average-satisfaction: uint, total-ratings: uint, performance-score: uint}) (profile {name: (string-ascii 50), skills: (string-ascii 200), hourly-rate: uint, rating: uint, completed-projects: uint}))
+  (if (is-eq badge-type BADGE_SPEED_DEMON)
+    (if (> (get total-milestones perf) u0) (/ (* (get on-time-deliveries perf) u100) (get total-milestones perf)) u0)
+    (if (is-eq badge-type BADGE_PERFECT_RATING)
+      (get average-satisfaction perf)
+      (get completed-projects profile)
+    )
+  )
+)
+
+(define-read-only (get-freelancer-badges (freelancer-addr principal))
+  (map-get? freelancer-badge-list freelancer-addr)
+)
+
+(define-read-only (get-badge-details (freelancer-addr principal) (badge-type (string-ascii 20)))
+  (map-get? freelancer-badges {freelancer: freelancer-addr, badge-type: badge-type})
+)
+
+(define-read-only (has-badge (freelancer-addr principal) (badge-type (string-ascii 20)))
+  (is-some (map-get? freelancer-badges {freelancer: freelancer-addr, badge-type: badge-type}))
 )
